@@ -22,16 +22,18 @@ import com.baidu.mapapi.map.MyLocationConfiguration;
 import com.baidu.mapapi.map.MyLocationData;
 import com.baidu.mapapi.model.LatLng;
 import com.baidu.mapapi.search.core.SearchResult;
+import com.baidu.mapapi.search.route.BikingRouteLine;
+import com.baidu.mapapi.search.route.BikingRoutePlanOption;
 import com.baidu.mapapi.search.route.BikingRouteResult;
-import com.baidu.mapapi.search.route.DrivingRouteLine;
-import com.baidu.mapapi.search.route.DrivingRoutePlanOption;
 import com.baidu.mapapi.search.route.DrivingRouteResult;
 import com.baidu.mapapi.search.route.OnGetRoutePlanResultListener;
 import com.baidu.mapapi.search.route.PlanNode;
 import com.baidu.mapapi.search.route.RoutePlanSearch;
 import com.baidu.mapapi.search.route.TransitRouteResult;
 import com.baidu.mapapi.search.route.WalkingRouteResult;
-import com.mim.routeplanning.overlayutil.DrivingRouteOverlay;
+import com.mim.routeplanning.overlayutil.BikingRouteOverlay;
+
+import java.util.LinkedList;
 
 public class MainActivity extends AppCompatActivity implements View.OnClickListener {
 
@@ -41,8 +43,12 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
     private LocationClient mLocClient = null;
     private boolean isFirstLoc = true;
     private BDLocation myCurLocation = null;
-    private RoutePlanSearch mSearch = null;
+    private RoutePlanSearch[] mSearch = null;
     private OnGetRoutePlanResultListener myRouteListener;
+    private LinkedList<BikingRouteOverlay> overlayList = null;
+    private FloatingActionButton btnLoc;
+    private FloatingActionButton btnRoute;
+    private ShortestPath shortestPath;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -51,8 +57,8 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
         setContentView(R.layout.activity_main);
         Toolbar toolbar = (Toolbar) findViewById(R.id.toolbar);
         setSupportActionBar(toolbar);
-        FloatingActionButton btnLoc = (FloatingActionButton) findViewById(R.id.btn_loc);
-        FloatingActionButton btnRoute = (FloatingActionButton) findViewById(R.id.btn_route);
+        btnLoc = (FloatingActionButton) findViewById(R.id.btn_loc);
+        btnRoute = (FloatingActionButton) findViewById(R.id.btn_route);
         btnLoc.setOnClickListener(this);
         btnRoute.setOnClickListener(this);
         mMapView = (MapView) findViewById(R.id.bmapView);
@@ -66,9 +72,7 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
         mBaiduMap.setMyLocationConfigeration(config);
         // 定位初始化
         initLocation();
-        mSearch = RoutePlanSearch.newInstance();
-        myRouteListener = new MyRouteListener();
-        mSearch.setOnGetRoutePlanResultListener(myRouteListener);
+        overlayList = new LinkedList<>();
     }
 
     private void initLocation() {
@@ -131,8 +135,13 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        mSearch.destroy();
+        if (mSearch != null) {
+            for (int i = 0; i < mSearch.length; i++) {
+                mSearch[i].destroy();
+            }
+        }
         // 当不需要定位图层时关闭定位图层
+        mLocClient.stop();
         mBaiduMap.setMyLocationEnabled(false);
         mMapView.onDestroy();
     }
@@ -156,11 +165,20 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
                 loc();
                 break;
             case R.id.btn_route:
-                PlanNode stNode = PlanNode.withCityNameAndPlaceName("西安", "西安电子科技大学");
-                PlanNode enNode = PlanNode.withCityNameAndPlaceName("西安", "公交五公司");
-                mSearch.drivingSearch((new DrivingRoutePlanOption())
-                        .from(stNode)
-                        .to(enNode));
+                if (!overlayList.isEmpty()) {
+                    for (BikingRouteOverlay overlay : overlayList) {
+                        overlay.removeFromMap();
+                    }
+                    overlayList.clear();
+                }
+                for (int i = 0; i < mSearch.length; i++) {
+                    mSearch[i] = RoutePlanSearch.newInstance();
+                    myRouteListener = new MyRouteListener();
+                    mSearch[i].setOnGetRoutePlanResultListener(myRouteListener);
+                    mSearch[i].bikingSearch(new BikingRoutePlanOption().from(shortestPath.getCurPlanNode()[i]).to(shortestPath.getCurPlanNode()[i + 1]));
+                }
+                Log.i(Constants.TAG, "mSearch:" + mSearch.length);
+                btnRoute.setClickable(false);
                 break;
             default:
                 break;
@@ -181,6 +199,9 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
         @Override
         public void onReceiveLocation(BDLocation bdLocation) {
             myCurLocation = bdLocation;
+            shortestPath = new ShortestPath(PlanNode.withLocation(new LatLng(myCurLocation.getLatitude(),
+                    myCurLocation.getLongitude())));
+            mSearch = new RoutePlanSearch[shortestPath.getCurNodeNum() - 1];
             Log.d(Constants.TAG, "type:" + bdLocation.getLocType() + "\n"
                     + "radius:" + bdLocation.getRadius() + "\n"
                     + "direction:" + bdLocation.getDirection() + "\n"
@@ -198,6 +219,8 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
             if (isFirstLoc) {
                 isFirstLoc = false;
                 loc();
+                btnRoute.setClickable(true);
+                Log.i(Constants.TAG, "firstloc");
             }
         }
     }
@@ -216,28 +239,35 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
 
         @Override
         public void onGetDrivingRouteResult(DrivingRouteResult drivingRouteResult) {
-            if (drivingRouteResult == null || drivingRouteResult.error != drivingRouteResult.error.NO_ERROR) {
-                //未找到结果
-                return;
-            }
-            if (drivingRouteResult.error == SearchResult.ERRORNO.AMBIGUOUS_ROURE_ADDR) {
-                //起终点或途经点地址有岐义，通过以下接口获取建议查询信息
-                //result.getSuggestAddrInfo()
-                return;
-            }
-            if (drivingRouteResult.error == SearchResult.ERRORNO.NO_ERROR) {
-                DrivingRouteLine route = drivingRouteResult.getRouteLines().get(0);
-                //创建驾车路线规划线路覆盖物
-                DrivingRouteOverlay overlay = new DrivingRouteOverlay(mBaiduMap);
-                overlay.setData(route);
-                overlay.addToMap();
-                overlay.zoomToSpan();
-            }
+
         }
 
         @Override
         public void onGetBikingRouteResult(BikingRouteResult bikingRouteResult) {
-
+            Log.i(Constants.TAG, "bikingRouteResult:" + bikingRouteResult.error);
+            if (bikingRouteResult == null || bikingRouteResult.error != bikingRouteResult.error.NO_ERROR) {
+                //未找到结果
+                return;
+            }
+            if (bikingRouteResult.error == SearchResult.ERRORNO.AMBIGUOUS_ROURE_ADDR) {
+                //起终点或途经点地址有岐义，通过以下接口获取建议查询信息
+                //result.getSuggestAddrInfo()
+                return;
+            }
+            if (bikingRouteResult.error == SearchResult.ERRORNO.NO_ERROR) {
+                BikingRouteLine line = bikingRouteResult.getRouteLines().get(0);
+                Log.i(Constants.TAG, "distance:" + bikingRouteResult.getRouteLines().get(0).getDistance() + " duration:" + bikingRouteResult.getRouteLines().get(0).getDuration());
+                //创建骑行路线规划线路覆盖物
+                BikingRouteOverlay overlay = new BikingRouteOverlay(mBaiduMap);
+                overlay.setData(line);
+                overlay.addToMap();
+                overlay.zoomToSpan();
+                overlayList.add(overlay);
+                Log.i(Constants.TAG, "overlayList.size():" + overlayList.size());
+                if (overlayList.size() == shortestPath.getCurNodeNum() - 1) {
+                    btnRoute.setClickable(true);
+                }
+            }
         }
     }
 }
